@@ -4,11 +4,15 @@
  * Full selector list mirrors Abaddon README styling section. */
 
 :root {
+  --encord-color-backdrop: #08090d;
   --encord-color-bg0: #0e0f13;
   --encord-color-bg1: #171923;
-  --encord-color-accent: #5865f2;
+  --encord-color-bg2: #1e2130;
+  --encord-color-accent: #ffffff;
+  --encord-color-danger: #f23f43;
   --encord-color-text0: #ffffff;
   --encord-color-text1: #b5bac1;
+  --encord-color-line: #ffffff14;
 }
 
 .app-window {

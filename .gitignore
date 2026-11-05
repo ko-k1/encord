@@ -3,3 +3,10 @@
 /encord.db
 /encord.db-shm
 /encord.db-wal
+
+# Build artifacts and local tooling
+/target/
+/.koteli/
+/.opencode/
+/koteli
+/kotelid

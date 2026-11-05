@@ -9,7 +9,7 @@
 
 use anyhow::{bail, Context, Result};
 use encord_cache::Cache;
-use encord_core::{Channel, CoreEvent};
+use encord_core::{Channel, CoreEvent, Message, Snowflake, User};
 use encord_gateway::{Gateway, GatewayCmd, GatewayConfig};
 use encord_settings::Settings;
 use std::collections::HashMap;
@@ -490,7 +490,7 @@ fn run_gui(settings: Settings, config_path: PathBuf, cache: Cache, theme_id: Str
         themes: list_themes(),
         current_theme: settings.gui.theme.clone(),
         guilds: guild_items(&cache),
-        channels: channel_items(&cache, None),
+        channels: channel_items(&cache, None, None),
         online: Vec::new(),
         offline: Vec::new(),
         channel_title: String::new(),
@@ -687,26 +687,121 @@ fn guild_items(cache: &Cache) -> Vec<encord_ui::GuildItem> {
     items
 }
 
+/// Comma-separated DM/group-DM participant names.
+fn recipient_labels(c: &Channel) -> String {
+    c.recipients
+        .iter()
+        .map(|u| u.username.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Display name for a channel: stored name, DM participant list, or fallback.
 fn channel_display(c: &Channel) -> String {
     if let Some(name) = &c.name {
         return name.clone();
     }
     if !c.recipients.is_empty() {
-        return c
-            .recipients
-            .iter()
-            .map(|u| u.username.clone())
-            .collect::<Vec<_>>()
-            .join(", ");
+        return recipient_labels(c);
     }
-    format!("channel {}", c.id)
+    if c.guild_id.is_some() {
+        "unnamed channel".to_string()
+    } else {
+        "Direct message".to_string()
+    }
+}
+
+/// Nickname-aware author label (falls back to the account username).
+fn user_display_name(cache: &Cache, guild_id: Option<Snowflake>, user: &User) -> String {
+    let base = guild_id
+        .and_then(|g| cache.member_display(g, user.id).ok().flatten())
+        .unwrap_or_else(|| user.username.clone());
+    if user.bot && !base.ends_with("[BOT]") {
+        format!("{base} [BOT]")
+    } else {
+        base
+    }
+}
+
+/// Human label for a channel id in the event log / typing line.
+fn channel_ref(cache: &Cache, id: Snowflake, self_id: Option<&str>) -> String {
+    match cache.find_channel(id).ok().flatten() {
+        Some(c) => {
+            let label = channel_display_label(cache, &c, self_id);
+            if c.guild_id.is_some() {
+                format!("# {label}")
+            } else {
+                label
+            }
+        }
+        None => "an unknown channel".to_string(),
+    }
+}
+
+/// Human label for a guild id in the event log.
+fn guild_ref(cache: &Cache, id: Snowflake) -> String {
+    cache
+        .find_guild_name(id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "an unknown server".to_string())
+}
+
+/// Human label for a user id in the event log.
+fn user_ref(cache: &Cache, id: Snowflake) -> String {
+    cache
+        .find_user_name(id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "an unknown user".to_string())
+}
+
+/// Resolve a channel label. `dm_label` is the pre-resolved participant list
+/// for a DM whose `recipients` array is missing; callers that render many
+/// rows should batch those lookups via [`Cache::dm_author_labels`].
+fn channel_label(c: &Channel, dm_label: Option<&str>) -> String {
+    if let Some(name) = &c.name {
+        if !name.trim().is_empty() {
+            return name.clone();
+        }
+    }
+    if !c.recipients.is_empty() {
+        return recipient_labels(c);
+    }
+    if c.guild_id.is_none() {
+        if let Some(label) = dm_label {
+            if !label.is_empty() {
+                return label.to_string();
+            }
+        }
+    }
+    channel_display(c)
+}
+
+/// Single-channel wrapper for the event log and channel header.
+fn channel_display_label(cache: &Cache, c: &Channel, self_id: Option<&str>) -> String {
+    let dm_label = if c.guild_id.is_none() && c.recipients.is_empty() {
+        let me = self_id
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(Snowflake::new);
+        cache
+            .dm_author_labels(&[c.id], me)
+            .ok()
+            .and_then(|labels| labels.get(&c.id).cloned())
+    } else {
+        None
+    };
+    channel_label(c, dm_label.as_deref())
 }
 
 /// Sorted, decorated channel rows: categories as headers, voice with icon.
 /// Sort key mirrors Discord: parent category position, categories first,
 /// then position.
-fn channel_items(cache: &Cache, guild: Option<&str>) -> Vec<encord_ui::ChannelItem> {
+fn channel_items(
+    cache: &Cache,
+    guild: Option<&str>,
+    self_id: Option<&str>,
+) -> Vec<encord_ui::ChannelItem> {
     let all = cache.list_channels().unwrap_or_default();
     let parent_pos = |id: &str| -> i32 {
         all.iter()
@@ -733,14 +828,30 @@ fn channel_items(cache: &Cache, guild: Option<&str>) -> Vec<encord_ui::ChannelIt
             c.position,
         )
     });
+    let dm_ids: Vec<Snowflake> = rows
+        .iter()
+        .filter(|c| c.guild_id.is_none() && c.recipients.is_empty())
+        .filter(|c| c.name.as_deref().is_none_or(|n| n.trim().is_empty()))
+        .map(|c| c.id)
+        .collect();
+    let dm_labels = cache
+        .dm_author_labels(
+            &dm_ids,
+            self_id
+                .and_then(|id| id.parse::<u64>().ok())
+                .map(Snowflake::new),
+        )
+        .unwrap_or_default();
+
     rows.into_iter()
         .map(|c| {
             let id = c.id.to_string();
+            let label = channel_label(c, dm_labels.get(&c.id).map(String::as_str));
             let (unread, mentions) = channel_unread(cache, &id);
             if c.is_category() {
                 encord_ui::ChannelItem {
                     id,
-                    name: channel_display(c).to_uppercase(),
+                    name: label.to_uppercase(),
                     header: true,
                     unread: false,
                     mentions: 0,
@@ -748,7 +859,7 @@ fn channel_items(cache: &Cache, guild: Option<&str>) -> Vec<encord_ui::ChannelIt
             } else if c.is_voice_like() {
                 encord_ui::ChannelItem {
                     id,
-                    name: format!("🔊 {}", channel_display(c)),
+                    name: format!("🔊 {label}"),
                     header: false,
                     unread: false,
                     mentions: 0,
@@ -756,7 +867,12 @@ fn channel_items(cache: &Cache, guild: Option<&str>) -> Vec<encord_ui::ChannelIt
             } else {
                 encord_ui::ChannelItem {
                     id,
-                    name: format!("# {}", channel_display(c)),
+                    // Guild channels get a # sigil; DMs already read as names.
+                    name: if c.guild_id.is_some() {
+                        format!("# {label}")
+                    } else {
+                        label
+                    },
                     header: false,
                     unread,
                     mentions,
@@ -766,22 +882,25 @@ fn channel_items(cache: &Cache, guild: Option<&str>) -> Vec<encord_ui::ChannelIt
         .collect()
 }
 
-fn push_channels(cache: &Cache, tx: &UiTx, guild: Option<&str>) {
+fn push_channels(cache: &Cache, tx: &UiTx, guild: Option<&str>, self_id: Option<&str>) {
     ui_send(
         tx,
-        encord_ui::UiUpdate::Channels(channel_items(cache, guild)),
+        encord_ui::UiUpdate::Channels(channel_items(cache, guild, self_id)),
     );
 }
 
-fn chat_msg_of(m: &encord_core::Message) -> encord_ui::ChatMsg {
-    let mut author = m.author.username.clone();
-    if m.author.bot {
-        author.push_str(" [BOT]");
-    }
+fn chat_msg_of(cache: &Cache, m: &Message) -> encord_ui::ChatMsg {
+    let author = user_display_name(cache, m.guild_id, &m.author);
     let reply = m
         .referenced_message
         .as_ref()
-        .map(|r| format!("↩ {}: {}", r.author.username, truncate(&r.content, 80)))
+        .map(|r| {
+            format!(
+                "↩ {}: {}",
+                user_display_name(cache, m.guild_id, &r.author),
+                truncate(&r.content, 80)
+            )
+        })
         .unwrap_or_default();
     let reactions = m
         .reactions
@@ -859,7 +978,7 @@ fn message_items(cache: &Cache, channel: Option<&str>) -> Vec<encord_ui::ChatMsg
             .last_messages(id, 50)
             .unwrap_or_default()
             .iter()
-            .map(chat_msg_of)
+            .map(|m| chat_msg_of(cache, m))
             .collect(),
         None => Vec::new(),
     }
@@ -952,9 +1071,13 @@ fn apply_theme(theme_id: &str, tx: &UiTx) {
     ui_send(
         tx,
         encord_ui::UiUpdate::Theme(encord_ui::ThemeColors {
+            backdrop: get("color.backdrop", "#08090d"),
             bg0: get("color.bg0", "#0e0f13"),
             bg1: get("color.bg1", "#171923"),
-            accent: get("color.accent", "#5865f2"),
+            bg2: get("color.bg2", "#1e2130"),
+            accent: get("color.accent", "#ffffff"),
+            danger: get("color.danger", "#f23f43"),
+            line: get("color.line", "#ffffff14"),
             text0: get("color.text0", "#ffffff"),
             text1: get("color.text1", "#b5bac1"),
         }),
@@ -1024,7 +1147,7 @@ fn core_thread(
         };
         apply_theme(&state.settings.gui.theme.clone(), &ui_tx);
         push_guilds(&cache, &ui_tx);
-        push_channels(&cache, &ui_tx, None);
+        push_channels(&cache, &ui_tx, None, None);
 
         // Gateway outbound lane is per-session (see run_session); the RPC
         // task below only ever sends RpcCmd.
@@ -1152,7 +1275,15 @@ async fn select_channel(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, id
     match found {
         Some(c) if c.is_text_like() => {
             state.selected_channel = Some(id.clone());
-            ui_send(tx, encord_ui::UiUpdate::ChannelTitle(channel_display(&c)));
+            ui_send(tx, encord_ui::UiUpdate::SelectedChannel(id.clone()));
+            ui_send(
+                tx,
+                encord_ui::UiUpdate::ChannelTitle(channel_display_label(
+                    cache,
+                    &c,
+                    state.self_id.as_deref(),
+                )),
+            );
             ui_send(
                 tx,
                 encord_ui::UiUpdate::ChannelTopic(c.topic.clone().unwrap_or_default()),
@@ -1226,13 +1357,15 @@ async fn select_guild(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, id: 
     if id == "home" {
         state.selected_guild = None;
         state.selected_channel = None;
+        ui_send(tx, encord_ui::UiUpdate::SelectedGuild("home".to_string()));
+        ui_send(tx, encord_ui::UiUpdate::SelectedChannel(String::new()));
         ui_send(
             tx,
             encord_ui::UiUpdate::GuildName("Direct Messages".to_string()),
         );
         ui_send(tx, encord_ui::UiUpdate::ChannelTitle(String::new()));
         ui_send(tx, encord_ui::UiUpdate::ChannelTopic(String::new()));
-        push_channels(cache, tx, None);
+        push_channels(cache, tx, None, state.self_id.as_deref());
         push_messages(cache, tx, None);
         push_members(cache, tx, state);
         return;
@@ -1247,9 +1380,11 @@ async fn select_guild(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, id: 
     state.selected_guild = Some(id.clone());
     state.selected_channel = None;
     ui_send(tx, encord_ui::UiUpdate::GuildName(name));
+    ui_send(tx, encord_ui::UiUpdate::SelectedGuild(id.clone()));
+    ui_send(tx, encord_ui::UiUpdate::SelectedChannel(String::new()));
     ui_send(tx, encord_ui::UiUpdate::ChannelTitle(String::new()));
     ui_send(tx, encord_ui::UiUpdate::ChannelTopic(String::new()));
-    push_channels(cache, tx, Some(&id));
+    push_channels(cache, tx, Some(&id), state.self_id.as_deref());
     push_messages(cache, tx, None);
     push_members(cache, tx, state);
 
@@ -1485,7 +1620,12 @@ fn mark_read(state: &CoreState, cache: &Cache, tx: &UiTx, channel_id: &str) {
         .pop()
         .map(|m| m.id);
     let _ = cache.upsert_read(cid, latest, 0);
-    push_channels(cache, tx, state.selected_guild.as_deref());
+    push_channels(
+        cache,
+        tx,
+        state.selected_guild.as_deref(),
+        state.self_id.as_deref(),
+    );
     push_guilds(cache, tx);
     if let Some(mid) = latest {
         spawn_ack(&state.settings, cid, mid);
@@ -1651,6 +1791,15 @@ fn log_cache_counts(cache: &Cache, tx: &UiTx, prefix: &str) {
 /// Persist one gateway event, refresh the affected UI lists, and log it.
 async fn route_event(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, ev: CoreEvent) {
     let selected = state.selected_channel.clone();
+    // Build the readable summary before the match mutates/removes cache rows,
+    // so deletes can still resolve the old name instead of showing a snowflake.
+    // Typing events resolve the user in their own branch; deferring the log
+    // line avoids resolving the same user twice via short_event.
+    let mut summary = if matches!(&ev, CoreEvent::TypingStart { .. }) {
+        String::new()
+    } else {
+        short_event(cache, state.self_id.as_deref(), &ev)
+    };
     match &ev {
         CoreEvent::Ready { user, .. } => {
             state.self_id = Some(user.id.to_string());
@@ -1666,7 +1815,12 @@ async fn route_event(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, ev: C
                 }
             }
             push_guilds(cache, tx);
-            push_channels(cache, tx, state.selected_guild.as_deref());
+            push_channels(
+                cache,
+                tx,
+                state.selected_guild.as_deref(),
+                state.self_id.as_deref(),
+            );
             log_cache_counts(cache, tx, "sync");
             // First connect with nothing open: pick the first guild (home
             // when guild-less) and its top text channel through the normal
@@ -1708,7 +1862,12 @@ async fn route_event(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, ev: C
         CoreEvent::GuildCreate(g) => {
             let _ = cache.upsert_guild(g);
             push_guilds(cache, tx);
-            push_channels(cache, tx, state.selected_guild.as_deref());
+            push_channels(
+                cache,
+                tx,
+                state.selected_guild.as_deref(),
+                state.self_id.as_deref(),
+            );
             let c2 = cache.clone();
             let t2 = tx.clone();
             tokio::spawn(async move {
@@ -1727,44 +1886,64 @@ async fn route_event(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, ev: C
         CoreEvent::GuildDelete { id, unavailable } => {
             // Outage blips carry `unavailable=true`: the guild is coming
             // back, so keep the cache painted instead of blanking the rail.
-            if *unavailable {
-                ui_send(
+            if !*unavailable {
+                let _ = cache.remove_guild(*id);
+                if state.selected_guild.as_deref() == Some(&id.to_string()) {
+                    state.selected_guild = None;
+                    state.selected_channel = None;
+                    ui_send(tx, encord_ui::UiUpdate::SelectedGuild("home".to_string()));
+                    ui_send(tx, encord_ui::UiUpdate::SelectedChannel(String::new()));
+                    ui_send(
+                        tx,
+                        encord_ui::UiUpdate::GuildName("Direct Messages".to_string()),
+                    );
+                    ui_send(tx, encord_ui::UiUpdate::ChannelTitle(String::new()));
+                    ui_send(tx, encord_ui::UiUpdate::ChannelTopic(String::new()));
+                    push_messages(cache, tx, None);
+                    push_members(cache, tx, state);
+                }
+                push_guilds(cache, tx);
+                push_channels(
+                    cache,
                     tx,
-                    encord_ui::UiUpdate::Log(format!("guild {id} unavailable (outage)")),
+                    state.selected_guild.as_deref(),
+                    state.self_id.as_deref(),
                 );
-                return;
             }
-            let _ = cache.remove_guild(*id);
-            if state.selected_guild.as_deref() == Some(&id.to_string()) {
-                state.selected_guild = None;
-                state.selected_channel = None;
-                ui_send(tx, encord_ui::UiUpdate::ChannelTitle(String::new()));
-                ui_send(tx, encord_ui::UiUpdate::ChannelTopic(String::new()));
-                push_messages(cache, tx, None);
-                push_members(cache, tx, state);
-            }
-            push_guilds(cache, tx);
-            push_channels(cache, tx, state.selected_guild.as_deref());
         }
         CoreEvent::ChannelCreate(c) => {
             let _ = cache.upsert_channel(c);
-            push_channels(cache, tx, state.selected_guild.as_deref());
+            push_channels(
+                cache,
+                tx,
+                state.selected_guild.as_deref(),
+                state.self_id.as_deref(),
+            );
         }
         CoreEvent::ChannelDelete(id) => {
             let _ = cache.remove_channel(*id);
             if state.selected_channel.as_deref() == Some(&id.to_string()) {
                 state.selected_channel = None;
+                ui_send(tx, encord_ui::UiUpdate::SelectedChannel(String::new()));
                 ui_send(tx, encord_ui::UiUpdate::ChannelTitle(String::new()));
                 ui_send(tx, encord_ui::UiUpdate::ChannelTopic(String::new()));
                 push_messages(cache, tx, None);
             }
-            push_channels(cache, tx, state.selected_guild.as_deref());
+            push_channels(
+                cache,
+                tx,
+                state.selected_guild.as_deref(),
+                state.self_id.as_deref(),
+            );
         }
         CoreEvent::MessageCreate(m) => {
             let _ = cache.upsert_message(m);
             let channel = m.channel_id.to_string();
             if selected.as_deref() == Some(&channel) {
-                ui_send(tx, encord_ui::UiUpdate::MessageAppend(chat_msg_of(m)));
+                ui_send(
+                    tx,
+                    encord_ui::UiUpdate::MessageAppend(chat_msg_of(cache, m)),
+                );
                 mark_read(state, cache, tx, &channel);
                 // Fetch image attachments, then repaint with thumbnails.
                 if m.attachments.iter().any(|a| a.is_image()) {
@@ -1794,7 +1973,12 @@ async fn route_event(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, ev: C
                     let _ =
                         cache.upsert_read(m.channel_id, read.last_message_id, read.mention_count);
                 }
-                push_channels(cache, tx, state.selected_guild.as_deref());
+                push_channels(
+                    cache,
+                    tx,
+                    state.selected_guild.as_deref(),
+                    state.self_id.as_deref(),
+                );
                 push_guilds(cache, tx);
             }
         }
@@ -1894,22 +2078,24 @@ async fn route_event(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, ev: C
                     mention_count: 0,
                 });
             let _ = cache.upsert_read(*channel_id, Some(*message_id), read.mention_count);
-            push_channels(cache, tx, state.selected_guild.as_deref());
+            push_channels(
+                cache,
+                tx,
+                state.selected_guild.as_deref(),
+                state.self_id.as_deref(),
+            );
             push_guilds(cache, tx);
         }
         CoreEvent::TypingStart {
             channel_id,
             user_id,
         } => {
-            let display = cache
-                .find_member_display(*user_id)
-                .unwrap_or(None)
-                .unwrap_or_else(|| {
-                    let id = user_id.to_string();
-                    // Snowflakes are ASCII digits; `get` keeps this
-                    // panic-free even for unexpected id shapes.
-                    format!("user {}", id.get(..8.min(id.len())).unwrap_or(&id))
-                });
+            let display = user_ref(cache, *user_id);
+            summary = format!(
+                "{} is typing in {}",
+                display,
+                channel_ref(cache, *channel_id, state.self_id.as_deref())
+            );
             state.typing.insert(
                 (channel_id.to_string(), user_id.to_string()),
                 (display, Instant::now()),
@@ -1959,7 +2145,12 @@ async fn route_event(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, ev: C
             for s in states {
                 let _ = cache.upsert_read(s.channel_id, s.last_message_id, s.mention_count);
             }
-            push_channels(cache, tx, state.selected_guild.as_deref());
+            push_channels(
+                cache,
+                tx,
+                state.selected_guild.as_deref(),
+                state.self_id.as_deref(),
+            );
             push_guilds(cache, tx);
         }
         CoreEvent::Disconnected { reason } => {
@@ -1970,61 +2161,158 @@ async fn route_event(state: &mut CoreState, cache: &Arc<Cache>, tx: &UiTx, ev: C
         }
         _ => {}
     }
-    ui_send(tx, encord_ui::UiUpdate::Log(short_event(&ev)));
+    ui_send(tx, encord_ui::UiUpdate::Log(summary));
 }
 
-fn short_event(ev: &CoreEvent) -> String {
+fn short_event(cache: &Cache, self_id: Option<&str>, ev: &CoreEvent) -> String {
     match ev {
         CoreEvent::Ready { user, .. } => format!("READY @{}", user.username),
         CoreEvent::Resumed => "RESUMED".to_string(),
-        CoreEvent::GuildCreate(g) => format!("+ guild {}", g.name),
-        CoreEvent::GuildUpdate(g) => format!("~ guild {}", g.name),
+        CoreEvent::GuildCreate(g) => format!("+ server {}", g.name),
+        CoreEvent::GuildUpdate(g) => format!("~ server {}", g.name),
         CoreEvent::GuildDelete { id, unavailable } => {
+            let name = guild_ref(cache, *id);
             if *unavailable {
-                format!("guild {id} unavailable (outage)")
+                format!("server {name} unavailable (outage)")
             } else {
-                format!("- guild {id}")
+                format!("- server {name}")
             }
         }
         CoreEvent::ChannelCreate(c) => {
-            format!("+ channel {}", c.name.as_deref().unwrap_or("?"))
+            format!(
+                "+ channel {}",
+                c.name
+                    .as_deref()
+                    .map(|n| format!("# {n}"))
+                    .unwrap_or_else(|| channel_display(c))
+            )
         }
-        CoreEvent::ChannelDelete(id) => format!("- channel {id}"),
+        CoreEvent::ChannelDelete(id) => {
+            format!("- channel {}", channel_ref(cache, *id, self_id))
+        }
         CoreEvent::MessageCreate(m) => {
-            format!("{}: {}", m.author.username, truncate(&m.content, 80))
+            let who = user_display_name(cache, m.guild_id, &m.author);
+            format!("{who}: {}", truncate(&m.content, 80))
         }
-        CoreEvent::MessageUpdate(m) => format!("edit {}: {}", m.id, truncate(&m.content, 80)),
-        CoreEvent::MessagePatch { message_id, .. } => format!("edit {message_id}"),
-        CoreEvent::MessageDelete { message_id, .. } => format!("delete {message_id}"),
-        CoreEvent::MessageDeleteBulk { message_ids, .. } => {
-            format!("bulk delete {} messages", message_ids.len())
+        CoreEvent::MessageUpdate(m) => {
+            let who = user_display_name(cache, m.guild_id, &m.author);
+            format!("edit {who}'s message: {}", truncate(&m.content, 80))
         }
-        CoreEvent::ReactionAdd { message_id, .. } => format!("+ reaction {message_id}"),
-        CoreEvent::ReactionRemove { message_id, .. } => format!("- reaction {message_id}"),
-        CoreEvent::ReactionRemoveAll { message_id, .. } => {
-            format!("clear reactions {message_id}")
+        CoreEvent::MessagePatch {
+            channel_id,
+            message_id,
+            content,
+            ..
+        } => {
+            let who = cache
+                .get_message(*channel_id, *message_id)
+                .ok()
+                .flatten()
+                .map(|m| user_display_name(cache, m.guild_id, &m.author))
+                .unwrap_or_else(|| "someone".to_string());
+            match content {
+                Some(content) => {
+                    format!("edit {who}'s message: {}", truncate(content, 80))
+                }
+                None => format!("edit {who}'s message"),
+            }
         }
-        CoreEvent::ReactionRemoveEmoji { message_id, .. } => {
-            format!("clear emoji {message_id}")
+        CoreEvent::MessageDelete {
+            channel_id,
+            message_id,
+        } => match cache.get_message(*channel_id, *message_id).ok().flatten() {
+            Some(m) => {
+                let who = user_display_name(cache, m.guild_id, &m.author);
+                format!("delete {who}'s message: {}", truncate(&m.content, 80))
+            }
+            None => format!(
+                "delete a message in {}",
+                channel_ref(cache, *channel_id, self_id)
+            ),
+        },
+        CoreEvent::MessageDeleteBulk {
+            channel_id,
+            message_ids,
+        } => format!(
+            "bulk delete {} messages in {}",
+            message_ids.len(),
+            channel_ref(cache, *channel_id, self_id)
+        ),
+        CoreEvent::ReactionAdd {
+            channel_id, emoji, ..
+        } => format!(
+            "+ reaction {} in {}",
+            emoji.label(),
+            channel_ref(cache, *channel_id, self_id)
+        ),
+        CoreEvent::ReactionRemove {
+            channel_id, emoji, ..
+        } => format!(
+            "- reaction {} in {}",
+            emoji.label(),
+            channel_ref(cache, *channel_id, self_id)
+        ),
+        CoreEvent::ReactionRemoveAll { channel_id, .. } => {
+            format!(
+                "clear reactions in {}",
+                channel_ref(cache, *channel_id, self_id)
+            )
         }
-        CoreEvent::MessageAck { channel_id, .. } => format!("ack {channel_id}"),
-        CoreEvent::TypingStart { user_id, .. } => format!("typing {user_id}"),
+        CoreEvent::ReactionRemoveEmoji {
+            channel_id, emoji, ..
+        } => format!(
+            "clear {} reactions in {}",
+            emoji.label(),
+            channel_ref(cache, *channel_id, self_id)
+        ),
+        CoreEvent::MessageAck { channel_id, .. } => {
+            format!("read {}", channel_ref(cache, *channel_id, self_id))
+        }
+        CoreEvent::TypingStart {
+            channel_id,
+            user_id,
+        } => format!(
+            "{} is typing in {}",
+            user_ref(cache, *user_id),
+            channel_ref(cache, *channel_id, self_id)
+        ),
         CoreEvent::PresenceUpdate {
             user_id, status, ..
-        } => format!("presence {user_id} {status}"),
-        CoreEvent::GuildMembersChunk { members, .. } => {
-            format!("{} members", members.len())
+        } => format!("{} is {status}", user_ref(cache, *user_id)),
+        CoreEvent::GuildMembersChunk {
+            guild_id, members, ..
+        } => format!(
+            "{} members in {}",
+            members.len(),
+            guild_ref(cache, *guild_id)
+        ),
+        CoreEvent::GuildMemberAdd { guild_id, member } => format!(
+            "+ {} joined {}",
+            member.display(),
+            guild_ref(cache, *guild_id)
+        ),
+        CoreEvent::GuildMemberUpdate { guild_id, member } => {
+            format!("~ {} in {}", member.display(), guild_ref(cache, *guild_id))
         }
-        CoreEvent::GuildMemberAdd { member, .. } => {
-            format!("+ member {}", member.display())
-        }
-        CoreEvent::GuildMemberUpdate { member, .. } => {
-            format!("~ member {}", member.display())
-        }
-        CoreEvent::GuildMemberRemove { user_id, .. } => format!("- member {user_id}"),
-        CoreEvent::ReadState(states) => format!("read state ({} channels)", states.len()),
+        CoreEvent::GuildMemberRemove { guild_id, user_id } => format!(
+            "- {} left {}",
+            user_ref(cache, *user_id),
+            guild_ref(cache, *guild_id)
+        ),
+        CoreEvent::ReadState(states) => format!("read state synced ({} channels)", states.len()),
         CoreEvent::Warning(w) => w.clone(),
-        CoreEvent::VoiceStateUpdate { user_id, .. } => format!("voice {user_id}"),
+        CoreEvent::VoiceStateUpdate {
+            channel_id,
+            user_id,
+            ..
+        } => match channel_id {
+            Some(channel_id) => format!(
+                "{} joined voice in {}",
+                user_ref(cache, *user_id),
+                channel_ref(cache, *channel_id, self_id)
+            ),
+            None => format!("{} left voice", user_ref(cache, *user_id)),
+        },
         CoreEvent::Disconnected { reason } => format!("disconnected: {reason}"),
     }
 }

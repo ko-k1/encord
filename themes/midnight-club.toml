@@ -3,11 +3,14 @@ id = "midnight-club"
 mode = "dark"
 
 [color]
+backdrop = "#08090d"
 bg0 = "#0e0f13"
 bg1 = "#171923"
-accent = "#5865f2"
+bg2 = "#1e2130"
+accent = "#ffffff"
 text0 = "#ffffff"
 text1 = "#b5bac1"
+line = "#ffffff14"
 danger = "#f23f43"
 
 [radius]

@@ -248,6 +248,17 @@ pub struct Emoji {
     pub name: Option<String>,
 }
 
+impl Emoji {
+    /// Short human label: unicode emoji as-is, custom emoji as `:name:`.
+    pub fn label(&self) -> String {
+        match (&self.id, &self.name) {
+            (_, Some(name)) if self.id.is_none() => name.clone(),
+            (Some(_), Some(name)) => format!(":{name}:"),
+            _ => "?".to_string(),
+        }
+    }
+}
+
 /// Message reaction (display only in M1).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reaction {
@@ -261,11 +272,7 @@ pub struct Reaction {
 
 impl Reaction {
     pub fn display_emoji(&self) -> String {
-        match (&self.emoji.id, &self.emoji.name) {
-            (_, Some(name)) if self.emoji.id.is_none() => name.clone(),
-            (Some(_), Some(name)) => format!(":{name}:"),
-            _ => "?".to_string(),
-        }
+        self.emoji.label()
     }
 }
 

@@ -1,6 +1,7 @@
 // encord AppWindow — retained-mode GPU UI (Slint + FemtoVG on wgpu/Vulkan).
-// Colors default to themes/midnight-club.toml tokens and are live-settable
-// from any token theme. No webview, no DOM.
+// Floating card system: every column is a rounded, shadowed surface over a
+// soft gradient backdrop. Colors default to themes/midnight-club.toml tokens
+// and are live-settable from any token theme. No webview, no DOM.
 import { Button, CheckBox, ComboBox, LineEdit, ListView, TabWidget } from "std-widgets.slint";
 
 struct GuildEntry {
@@ -21,6 +22,7 @@ struct ChannelEntry {
 struct MemberItem {
     id: string,
     display: string,
+    initial: string,
     status: string,
 }
 
@@ -32,6 +34,7 @@ struct AttachmentItem {
 
 struct ChatMessage {
     id: string,
+    initial: string,
     author: string,
     body: string,
     time: string,
@@ -42,17 +45,39 @@ struct ChatMessage {
 
 export component AppWindow inherits Window {
     title: "encord";
+    preferred-width: 1280px;
+    preferred-height: 800px;
     min-width: 1000px;
     min-height: 640px;
-    background: c-bg0;
+    background: @linear-gradient(135deg, c-backdrop 0%, c-bg0 52%, c-backdrop 100%);
     default-font-size: 14px;
 
     // Live theme colors (set from themes/*.toml tokens).
+    in-out property <color> c-backdrop: #08090d;
     in-out property <color> c-bg0: #0e0f13;
     in-out property <color> c-bg1: #171923;
-    in-out property <color> c-accent: #5865f2;
+    in-out property <color> c-bg2: #1e2130;
+    in-out property <color> c-accent: #ffffff;
+    in-out property <color> c-danger: #f23f43;
+    in-out property <color> c-line: #ffffff14;
     in-out property <color> c-text0: #ffffff;
     in-out property <color> c-text1: #b5bac1;
+
+    // Contrast colors for accent/danger surfaces: dark text when the fill
+    // is light, white text when the fill is dark. The luma crossover is
+    // around 120; the previous 160 threshold chose white on mid-tones.
+    property <color> c-on-accent: ((c-accent.red * 299 + c-accent.green * 587 + c-accent.blue * 114) / 1000 > 120) ? #111318 : #ffffff;
+    property <color> c-on-danger: ((c-danger.red * 299 + c-danger.green * 587 + c-danger.blue * 114) / 1000 > 120) ? #111318 : #ffffff;
+
+    // Shared surface treatment for the floating card system.
+    property <color> c-tint: #ffffff06;
+    property <color> c-tint-soft: #ffffff04;
+    property <color> c-shadow: #000000a0;
+    property <color> c-shadow-soft: #00000080;
+    property <length> chat-header-height: 84px;
+    property <length> composer-height: 76px;
+    property <length> settings-card-width: 560px;
+    property <length> settings-card-height: 520px;
 
     in-out property <string> status-text: "starting…";
     in-out property <string> connect-label: "Connect";
@@ -61,6 +86,11 @@ export component AppWindow inherits Window {
     in-out property <[ChannelEntry]> channels;
     in-out property <[ChatMessage]> messages;
     in-out property <[string]> event-log;
+
+    // Selection (set by the core when the user picks a guild/channel).
+    // Startup paints the DM/home column, so home starts selected.
+    in-out property <string> selected-guild: "home";
+    in-out property <string> selected-channel: "";
 
     // Userlist (selected guild) + chat header.
     in-out property <[MemberItem]> online;
@@ -86,318 +116,641 @@ export component AppWindow inherits Window {
     callback reload-css();
 
     HorizontalLayout {
-        spacing: 0px;
+        padding: 16px;
+        spacing: 10px;
 
-        // Guild rail.
+        // Guild rail: a floating vertical dock.
         Rectangle {
             width: 64px;
-            background: c-bg0;
+            border-radius: 20px;
+            background: c-bg1;
+            border-width: 1px;
+            border-color: c-line;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: c-shadow;
+            drop-shadow-offset-y: 6px;
+
             VerticalLayout {
-                // Explicit geometry: layouts inside plain elements do not
-                // auto-size, and 0×0 content paints (and clicks) nowhere.
                 x: 0px;
                 y: 0px;
                 width: parent.width;
                 height: parent.height;
-                padding-top: 8px;
-                spacing: 6px;
+                padding: 8px;
+                spacing: 8px;
                 for g in guilds: Rectangle {
-                    height: 44px;
-                    border-radius: 12px;
-                    background: c-bg1;
-                    TouchArea {
-                        // Explicit geometry: bare elements default to 0×0
-                        // and would never see clicks.
+                    height: 48px;
+                    border-radius: 16px;
+                    background: (g.id == root.selected-guild)
+                        ? c-accent
+                        : (gta.has-hover ? c-bg2 : transparent);
+                    animate background { duration: 150ms; easing: ease-out; }
+
+                    gta := TouchArea {
                         x: 0px;
                         y: 0px;
                         width: parent.width;
                         height: parent.height;
+                        mouse-cursor: pointer;
+                        accessible-role: button;
+                        accessible-label: g.label;
                         clicked => { root.guild-selected(g.id); }
                     }
+
+                    // Selection pill in the rail gutter.
+                    if g.id == root.selected-guild: Rectangle {
+                        width: 3px;
+                        height: 22px;
+                        x: -8px;
+                        y: 13px;
+                        border-radius: 2px;
+                        background: c-text0;
+                    }
+
                     // Initials show through wherever the icon is missing.
                     Text {
                         text: g.label;
-                        color: c-text0;
-                        font-size: 12px;
+                        width: parent.width;
+                        height: parent.height;
+                        color: (g.id == root.selected-guild) ? c-on-accent : c-text0;
+                        font-size: 13px;
+                        font-weight: 700;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                    Image {
-                        source: g.icon;
-                        width: 44px;
-                        height: 44px;
-                        image-fit: cover;
+
+                    // Rounded icon mask. Transparent when no icon is cached,
+                    // so the initials remain visible.
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: parent.height;
+                        border-radius: 16px;
+                        clip: true;
+                        Image {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            source: g.icon;
+                            image-fit: cover;
+                        }
                     }
-                    // Rounded icon mask (Image itself takes no radius).
+
                     if g.unread: Rectangle {
-                        width: 8px;
-                        height: 8px;
-                        x: 48px;
-                        y: 4px;
-                        border-radius: 4px;
-                        background: c-text0;
+                        width: 10px;
+                        height: 10px;
+                        x: parent.width - 13px;
+                        y: 3px;
+                        border-radius: 5px;
+                        border-width: 2px;
+                        border-color: c-bg1;
+                        background: (g.id == root.selected-guild) ? c-on-accent : c-text0;
                     }
                 }
             }
         }
 
-        // Channel column.
+        // Channel column: floating navigation card.
         Rectangle {
-            width: 220px;
+            width: 232px;
+            border-radius: 18px;
             background: c-bg1;
+            border-width: 1px;
+            border-color: c-line;
+            clip: true;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: c-shadow;
+            drop-shadow-offset-y: 6px;
+
             VerticalLayout {
                 x: 0px;
                 y: 0px;
                 width: parent.width;
                 height: parent.height;
                 spacing: 0px;
-                Text {
-                    text: guild-name;
-                    color: c-text0;
-                    font-size: 15px;
-                    font-weight: 700;
-                    height: 48px;
-                    vertical-alignment: center;
-                    x: 12px;
+
+                Rectangle {
+                    height: 60px;
+                    background: c-tint;
+                    Text {
+                        text: guild-name;
+                        color: c-text0;
+                        font-size: 16px;
+                        font-weight: 700;
+                        x: 18px;
+                        width: parent.width - 36px;
+                        height: parent.height;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
                 }
-                Rectangle { height: 1px; background: c-bg0; }
+                Rectangle {
+                    height: 1px;
+                    x: 14px;
+                    width: parent.width - 28px;
+                    background: c-line;
+                }
+
                 ListView {
                     vertical-stretch: 1;
                     for c in channels: Rectangle {
-                        height: c.header ? 28px : 34px;
-                        if !c.header: TouchArea {
+                        height: c.header ? 32px : 40px;
+                        background: transparent;
+
+                        // Inset row so hover/selection reads as a floating pill.
+                        Rectangle {
+                            x: 8px;
+                            y: 3px;
+                            width: parent.width - 16px;
+                            height: parent.height - 6px;
+                            border-radius: 10px;
+                            background: c.header
+                                ? transparent
+                                : (c.id == root.selected-channel
+                                    ? c-bg2
+                                    : (cta.has-hover ? c-bg2 : transparent));
+                            border-width: (c.id == root.selected-channel && !c.header) ? 1px : 0px;
+                            border-color: c-line;
+                            animate background { duration: 150ms; easing: ease-out; }
+                        }
+
+                        cta := TouchArea {
+                            enabled: !c.header;
                             x: 0px;
                             y: 0px;
                             width: parent.width;
                             height: parent.height;
-                            clicked => { root.channel-selected(c.id); }
+                            mouse-cursor: pointer;
+                            accessible-role: button;
+                            accessible-label: c.name;
+                            clicked => {
+                                if !c.header {
+                                    root.channel-selected(c.id);
+                                }
+                            }
                         }
-                        if c.unread: Rectangle {
-                            width: 4px;
-                            height: 20px;
-                            x: 2px;
-                            y: 7px;
+
+                        // Active channel accent bar.
+                        if c.id == root.selected-channel && !c.header: Rectangle {
+                            width: 3px;
+                            height: 18px;
+                            x: 12px;
+                            y: 11px;
                             border-radius: 2px;
-                            background: c-text0;
+                            background: c-accent;
                         }
+                        // Unread channel marker.
+                        if c.unread && !c.header && c.id != root.selected-channel: Rectangle {
+                            width: 3px;
+                            height: 18px;
+                            x: 12px;
+                            y: 11px;
+                            border-radius: 2px;
+                            background: c-text1;
+                        }
+
                         Text {
                             text: c.name;
-                            color: c.header ? c-text0 : c-text1;
-                            font-size: c.header ? 11px : 14px;
-                            font-weight: c.header || c.unread ? 700 : 400;
-                            x: 12px;
+                            color: c.header
+                                ? c-text1
+                                : ((c.unread || c.id == root.selected-channel) ? c-text0 : c-text1);
+                            font-size: c.header ? 11px : 13px;
+                            font-weight: (c.header || c.unread || c.id == root.selected-channel) ? 700 : 400;
+                            x: 22px;
+                            width: parent.width - 60px;
+                            height: parent.height;
                             vertical-alignment: center;
+                            overflow: elide;
                         }
-                        if c.mentions > 0: Rectangle {
-                            width: 22px;
-                            height: 18px;
-                            x: 186px;
-                            y: 8px;
-                            border-radius: 9px;
-                            background: #f04747;
+
+                        if c.mentions > 0 && !c.header: Rectangle {
+                            width: 26px;
+                            height: 20px;
+                            x: parent.width - 44px;
+                            y: 10px;
+                            border-radius: 10px;
+                            background: c-danger;
                             Text {
                                 text: c.mentions;
-                                color: #ffffff;
-                                font-size: 11px;
+                                color: c-on-danger;
+                                font-size: 10px;
                                 font-weight: 700;
+                                width: parent.width;
+                                height: parent.height;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
                         }
                     }
                 }
-                Rectangle { height: 1px; background: c-bg0; }
-                HorizontalLayout {
-                    height: 52px;
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 8px;
-                    Button {
-                        text: connect-label;
-                        clicked => { root.connect-pressed(); }
-                    }
-                    Button {
-                        text: "⚙";
-                        clicked => { root.show-settings = true; }
+
+                Rectangle {
+                    height: 1px;
+                    x: 14px;
+                    width: parent.width - 28px;
+                    background: c-line;
+                }
+                VerticalLayout {
+                    height: 96px;
+                    padding: 10px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        height: 32px;
+                        spacing: 6px;
+                        Button {
+                            text: connect-label;
+                            height: 32px;
+                            horizontal-stretch: 1;
+                            clicked => { root.connect-pressed(); }
+                        }
+                        Button {
+                            text: "Settings";
+                            height: 32px;
+                            clicked => { root.show-settings = true; }
+                        }
                     }
                     Text {
                         text: status-text;
                         color: c-text1;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
+                        font-size: 11px;
+                        horizontal-alignment: center;
                         wrap: word-wrap;
-                        overflow: elide;
                     }
                 }
             }
         }
 
-        // Main column: chat or settings.
+        // Main column: floating chat / settings surface.
         Rectangle {
             horizontal-stretch: 1;
+            border-radius: 18px;
             background: c-bg0;
+            border-width: 1px;
+            border-color: c-line;
+            clip: true;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: c-shadow;
+            drop-shadow-offset-y: 6px;
+
             if !root.show-settings: VerticalLayout {
                 x: 0px;
                 y: 0px;
                 width: parent.width;
                 height: parent.height;
                 spacing: 0px;
+
                 // Chat header: channel title, topic, typing.
-                VerticalLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
-                    padding-top: 8px;
-                    spacing: 0px;
-                    Text {
-                        text: channel-title;
-                        color: c-text0;
-                        font-size: 15px;
-                        font-weight: 700;
-                    }
-                    if channel-topic != "": Text {
-                        text: channel-topic;
-                        color: c-text1;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-                    if typing-text != "": Text {
-                        text: typing-text;
-                        color: c-text1;
-                        font-size: 12px;
+                Rectangle {
+                    height: chat-header-height;
+                    background: c-tint;
+                    VerticalLayout {
+                        x: 20px;
+                        y: 12px;
+                        width: parent.width - 40px;
+                        height: parent.height - 24px;
+                        spacing: 3px;
+                        Text {
+                            text: channel-title;
+                            color: c-text0;
+                            font-size: 16px;
+                            font-weight: 700;
+                            overflow: elide;
+                        }
+                        if channel-topic != "": Text {
+                            text: channel-topic;
+                            color: c-text1;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                        if typing-text != "": Text {
+                            text: typing-text;
+                            color: c-text1;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
                     }
                 }
-                Rectangle { height: 8px; }
+                Rectangle {
+                    height: 1px;
+                    x: 18px;
+                    width: parent.width - 36px;
+                    background: c-line;
+                }
+
                 ListView {
                     vertical-stretch: 1;
                     for m in messages: VerticalLayout {
-                        padding-left: 16px;
-                        padding-right: 16px;
-                        padding-top: 6px;
-                        padding-bottom: 6px;
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 9px;
+                        padding-bottom: 9px;
                         spacing: 2px;
-                        if m.reply != "": Text {
-                            text: m.reply;
-                            color: c-text1;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
                         HorizontalLayout {
-                            spacing: 8px;
-                            Text {
-                                text: m.author;
-                                color: c-accent;
-                                font-weight: 700;
+                            spacing: 10px;
+                            // Initial-avatar fallback: no per-message image fetch.
+                            Rectangle {
+                                width: 36px;
+                                height: 36px;
+                                border-radius: 18px;
+                                background: c-bg2;
+                                border-width: 1px;
+                                border-color: c-line;
+                                Text {
+                                    text: m.initial;
+                                    color: c-text0;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
                             }
-                            Text {
-                                text: m.time;
-                                color: c-text1;
-                                font-size: 11px;
-                                vertical-alignment: bottom;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                if m.reply != "": Text {
+                                    text: m.reply;
+                                    color: c-text1;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: m.author;
+                                        color: c-accent;
+                                        font-weight: 700;
+                                    }
+                                    Text {
+                                        text: m.time;
+                                        color: c-text1;
+                                        font-size: 11px;
+                                        vertical-alignment: bottom;
+                                    }
+                                }
+                                Text {
+                                    text: m.body;
+                                    color: c-text0;
+                                    wrap: word-wrap;
+                                }
+                                for a in m.attachments: Rectangle {
+                                    height: a.is-image ? 170px : 26px;
+                                    if a.is-image: Image {
+                                        source: a.image;
+                                        width: 300px;
+                                        height: 170px;
+                                        image-fit: contain;
+                                        horizontal-alignment: left;
+                                    }
+                                    if !a.is-image: Text {
+                                        text: a.label;
+                                        color: c-text1;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                if m.reactions != "": Text {
+                                    text: m.reactions;
+                                    color: c-text1;
+                                    font-size: 13px;
+                                }
                             }
-                        }
-                        Text {
-                            text: m.body;
-                            color: c-text0;
-                            wrap: word-wrap;
-                        }
-                        for a in m.attachments: Rectangle {
-                            height: a.is-image ? 170px : 26px;
-                            if a.is-image: Image {
-                                source: a.image;
-                                width: 300px;
-                                height: 170px;
-                                image-fit: contain;
-                                horizontal-alignment: left;
-                            }
-                            if !a.is-image: Text {
-                                text: a.label;
-                                color: c-text1;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-                        }
-                        if m.reactions != "": Text {
-                            text: m.reactions;
-                            color: c-text1;
-                            font-size: 13px;
                         }
                     }
                 }
-                Rectangle { height: 1px; background: c-bg1; }
-                HorizontalLayout {
-                    padding: 12px;
-                    spacing: 8px;
-                    input := LineEdit {
-                        placeholder-text: "Message…";
-                        horizontal-stretch: 1;
-                    }
-                    Button {
-                        text: "Send";
-                        clicked => {
-                            root.send-message(input.text);
-                            input.text = "";
+
+                // Seamless composer island: one surface holds the input and Send.
+                Rectangle {
+                    height: composer-height;
+                    background: c-tint-soft;
+                    Rectangle {
+                        x: 12px;
+                        y: 12px;
+                        width: parent.width - 24px;
+                        height: 52px;
+                        border-radius: 14px;
+                        background: c-bg2;
+                        border-width: 1px;
+                        border-color: c-line;
+                        drop-shadow-blur: 10px;
+                        drop-shadow-color: c-shadow-soft;
+                        drop-shadow-offset-y: 3px;
+
+                        HorizontalLayout {
+                            x: 14px;
+                            y: 8px;
+                            width: parent.width - 28px;
+                            height: parent.height - 16px;
+                            spacing: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: parent.height;
+                                clip: true;
+                                Text {
+                                    text: input.text == "" ? "Message…" : "";
+                                    color: c-text1;
+                                    font-size: 14px;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    vertical-alignment: center;
+                                    accessible-role: none;
+                                }
+                                input := TextInput {
+                                    x: 0px;
+                                    width: max(parent.width, self.preferred-width);
+                                    height: parent.height;
+                                    color: c-text0;
+                                    font-size: 14px;
+                                    vertical-alignment: center;
+                                    single-line: true;
+                                    accessible-label: "Message";
+                                    selection-background-color: c-accent;
+                                    selection-foreground-color: c-on-accent;
+                                    cursor-position-changed(cursor-position) => {
+                                        if cursor-position.x + self.x < 0px {
+                                            self.x = -cursor-position.x;
+                                        } else if cursor-position.x + self.x > parent.width - self.text-cursor-width {
+                                            self.x = parent.width - cursor-position.x - self.text-cursor-width;
+                                        }
+                                    }
+                                    accepted => {
+                                        root.send-message(input.text);
+                                        input.text = "";
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                width: 64px;
+                                height: 32px;
+                                border-radius: 9px;
+                                background: c-accent;
+                                opacity: send-button.pressed ? 0.72 : (send-button.has-hover ? 0.9 : 1.0);
+                                animate opacity { duration: 140ms; easing: ease-out; }
+                                Text {
+                                    text: "Send";
+                                    color: c-on-accent;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    accessible-role: none;
+                                }
+                                send-button := TouchArea {
+                                    x: 0px;
+                                    y: 0px;
+                                    width: parent.width;
+                                    height: parent.height;
+                                    mouse-cursor: pointer;
+                                    accessible-role: button;
+                                    accessible-label: "Send";
+                                    clicked => {
+                                        root.send-message(input.text);
+                                        input.text = "";
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-            if root.show-settings: VerticalLayout {
+
+            // Empty-chat affordance: shown between the header and composer.
+            if !root.show-settings && root.channel-title == "" && root.messages.length == 0: Text {
+                text: "Select a channel to start chatting";
+                color: c-text1;
+                font-size: 15px;
+                y: chat-header-height;
+                width: parent.width;
+                height: parent.height - chat-header-height - composer-height;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            if root.show-settings: HorizontalLayout {
                 x: 0px;
                 y: 0px;
                 width: parent.width;
                 height: parent.height;
-                padding: 24px;
-                spacing: 12px;
-                Text {
-                    text: "Settings";
-                    color: c-text0;
-                    font-size: 20px;
-                    font-weight: 700;
-                }
-                Text { text: "User token (restart-free: press Connect after saving)"; color: c-text1; }
-                tokenbox := LineEdit {
-                    text: root.token-text;
-                    placeholder-text: "Discord token";
-                }
-                autobox := CheckBox {
-                    text: "Connect on launch";
-                    checked: root.autoconnect;
-                }
-                Text { text: "Theme"; color: c-text1; }
-                themebox := ComboBox {
-                    model: root.themes;
-                    current-value: root.current-theme;
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-                    Button {
-                        text: "Save";
-                        clicked => {
-                            root.save-settings(tokenbox.text, autobox.checked, themebox.current-value);
+                padding: 30px;
+                alignment: center;
+                cross-axis-alignment: center;
+
+                Rectangle {
+                    width: Math.min(settings-card-width, parent.width - 60px);
+                    height: settings-card-height;
+                    border-radius: 16px;
+                    background: c-bg1;
+                    border-width: 1px;
+                    border-color: c-line;
+                    drop-shadow-blur: 14px;
+                    drop-shadow-color: c-shadow;
+                    drop-shadow-offset-y: 5px;
+
+                    VerticalLayout {
+                        x: 24px;
+                        y: 24px;
+                        width: parent.width - 48px;
+                        height: parent.height - 48px;
+                        spacing: 12px;
+
+                        Text {
+                            text: "Settings";
+                            color: c-text0;
+                            font-size: 24px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Account, appearance and connection";
+                            color: c-text1;
+                            font-size: 12px;
+                        }
+                        Rectangle { height: 1px; background: c-line; }
+
+                        Text {
+                            text: "ACCOUNT";
+                            color: c-text1;
+                            font-size: 11px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Discord token (press Connect after saving)";
+                            color: c-text1;
+                            font-size: 12px;
+                        }
+                        tokenbox := LineEdit {
+                            text: root.token-text;
+                            placeholder-text: "Discord token";
+                        }
+                        autobox := CheckBox {
+                            text: "Connect on launch";
+                            checked: root.autoconnect;
+                        }
+
+                        Text {
+                            text: "APPEARANCE";
+                            color: c-text1;
+                            font-size: 11px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Theme";
+                            color: c-text1;
+                            font-size: 12px;
+                        }
+                        themebox := ComboBox {
+                            model: root.themes;
+                            current-value: root.current-theme;
+                        }
+
+                        Rectangle { vertical-stretch: 1; }
+                        Rectangle { height: 1px; background: c-line; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button {
+                                text: "Save";
+                                height: 32px;
+                                clicked => {
+                                    root.save-settings(tokenbox.text, autobox.checked, themebox.current-value);
+                                }
+                            }
+                            Button {
+                                text: "Reload CSS";
+                                height: 32px;
+                                clicked => { root.reload-css(); }
+                            }
+                            Button {
+                                text: "Back";
+                                height: 32px;
+                                clicked => { root.show-settings = false; }
+                            }
+                        }
+                        Text {
+                            text: status-text;
+                            color: c-text1;
+                            font-size: 12px;
+                            wrap: word-wrap;
                         }
                     }
-                    Button {
-                        text: "Reload CSS";
-                        clicked => { root.reload-css(); }
-                    }
-                    Button {
-                        text: "Back";
-                        clicked => { root.show-settings = false; }
-                    }
-                }
-                Text {
-                    text: status-text;
-                    color: c-text1;
-                    font-size: 12px;
-                    wrap: word-wrap;
                 }
             }
         }
 
-        // Right column: userlist + diagnostics tabs.
+        // Right column: floating members / diagnostics card.
         Rectangle {
-            width: 250px;
+            width: 248px;
+            border-radius: 18px;
             background: c-bg1;
+            border-width: 1px;
+            border-color: c-line;
+            clip: true;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: c-shadow;
+            drop-shadow-offset-y: 6px;
+
             TabWidget {
                 x: 0px;
                 y: 0px;
@@ -413,59 +766,105 @@ export component AppWindow inherits Window {
                         spacing: 0px;
                         Text {
                             text: "ONLINE — " + online-count;
-                            color: c-text0;
+                            color: c-text1;
                             font-size: 11px;
                             font-weight: 700;
-                            height: 28px;
+                            height: 34px;
                             vertical-alignment: center;
-                            x: 12px;
+                            x: 16px;
                         }
                         ListView {
                             vertical-stretch: 3;
                             for m in online: HorizontalLayout {
-                                height: 30px;
-                                spacing: 8px;
-                                padding-left: 12px;
+                                height: 38px;
+                                spacing: 10px;
+                                padding-left: 14px;
+                                padding-right: 8px;
                                 Rectangle {
-                                    width: 10px;
-                                    height: 10px;
-                                    y: 10px;
-                                    border-radius: 5px;
-                                    background: m.status == "online" ? #43b581 : m.status == "idle" ? #faa61a : m.status == "dnd" ? #f04747 : #747f8d;
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 14px;
+                                    background: c-bg2;
+                                    border-width: 1px;
+                                    border-color: c-line;
+                                    Text {
+                                        text: m.initial;
+                                        color: c-text0;
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle {
+                                        width: 10px;
+                                        height: 10px;
+                                        x: 18px;
+                                        y: 18px;
+                                        border-radius: 5px;
+                                        border-width: 2px;
+                                        border-color: c-bg1;
+                                        background: m.status == "online" ? c-accent : m.status == "idle" ? #faa61a : m.status == "dnd" ? c-danger : #747f8d;
+                                    }
                                 }
                                 Text {
                                     text: m.display;
                                     color: c-text1;
                                     vertical-alignment: center;
+                                    overflow: elide;
                                 }
                             }
                         }
                         Text {
                             text: "OFFLINE — " + offline-count;
-                            color: c-text0;
+                            color: c-text1;
                             font-size: 11px;
                             font-weight: 700;
-                            height: 28px;
+                            height: 34px;
                             vertical-alignment: center;
-                            x: 12px;
+                            x: 16px;
                         }
                         ListView {
                             vertical-stretch: 2;
                             for m in offline: HorizontalLayout {
-                                height: 30px;
-                                spacing: 8px;
-                                padding-left: 12px;
+                                height: 38px;
+                                spacing: 10px;
+                                padding-left: 14px;
+                                padding-right: 8px;
                                 Rectangle {
-                                    width: 10px;
-                                    height: 10px;
-                                    y: 10px;
-                                    border-radius: 5px;
-                                    background: #747f8d;
+                                    width: 28px;
+                                    height: 28px;
+                                    border-radius: 14px;
+                                    background: c-bg2;
+                                    border-width: 1px;
+                                    border-color: c-line;
+                                    Text {
+                                        text: m.initial;
+                                        color: c-text1;
+                                        font-size: 12px;
+                                        font-weight: 700;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle {
+                                        width: 10px;
+                                        height: 10px;
+                                        x: 18px;
+                                        y: 18px;
+                                        border-radius: 5px;
+                                        border-width: 2px;
+                                        border-color: c-bg1;
+                                        background: #747f8d;
+                                    }
                                 }
                                 Text {
                                     text: m.display;
-                                    color: #747f8d;
+                                    color: c-text1;
                                     vertical-alignment: center;
+                                    overflow: elide;
                                 }
                             }
                         }
@@ -487,6 +886,7 @@ export component AppWindow inherits Window {
                                 font-size: 11px;
                                 wrap: word-wrap;
                                 x: 12px;
+                                width: parent.width - 24px;
                             }
                         }
                     }

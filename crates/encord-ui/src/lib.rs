@@ -55,9 +55,13 @@ pub struct MemberData {
 }
 
 pub struct ThemeColors {
+    pub backdrop: String,
     pub bg0: String,
     pub bg1: String,
+    pub bg2: String,
     pub accent: String,
+    pub danger: String,
+    pub line: String,
     pub text0: String,
     pub text1: String,
 }
@@ -81,6 +85,8 @@ pub enum UiUpdate {
     ChannelTopic(String),
     Typing(String),
     Theme(ThemeColors),
+    SelectedGuild(String),
+    SelectedChannel(String),
 }
 
 /// UI -> core actions.
@@ -258,14 +264,26 @@ pub fn run(
                     UiUpdate::ChannelTopic(t) => ui.set_channel_topic(t.into()),
                     UiUpdate::Typing(t) => ui.set_typing_text(t.into()),
                     UiUpdate::Theme(t) => {
+                        if let Some(c) = parse_hex(&t.backdrop) {
+                            ui.set_c_backdrop(c);
+                        }
                         if let Some(c) = parse_hex(&t.bg0) {
                             ui.set_c_bg0(c);
                         }
                         if let Some(c) = parse_hex(&t.bg1) {
                             ui.set_c_bg1(c);
                         }
+                        if let Some(c) = parse_hex(&t.bg2) {
+                            ui.set_c_bg2(c);
+                        }
                         if let Some(c) = parse_hex(&t.accent) {
                             ui.set_c_accent(c);
+                        }
+                        if let Some(c) = parse_hex(&t.danger) {
+                            ui.set_c_danger(c);
+                        }
+                        if let Some(c) = parse_hex(&t.line) {
+                            ui.set_c_line(c);
                         }
                         if let Some(c) = parse_hex(&t.text0) {
                             ui.set_c_text0(c);
@@ -274,6 +292,8 @@ pub fn run(
                             ui.set_c_text1(c);
                         }
                     }
+                    UiUpdate::SelectedGuild(id) => ui.set_selected_guild(id.into()),
+                    UiUpdate::SelectedChannel(id) => ui.set_selected_channel(id.into()),
                 }
             }
         },
@@ -284,11 +304,20 @@ pub fn run(
 }
 
 fn member_item(m: MemberData) -> MemberItem {
+    let initial = initial_of(&m.display);
     MemberItem {
         id: m.user_id.into(),
         display: m.display.into(),
+        initial: initial.into(),
         status: m.status.into(),
     }
+}
+
+fn initial_of(name: &str) -> String {
+    name.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 fn guild_entry(g: GuildItem) -> GuildEntry {
@@ -326,8 +355,10 @@ fn attachment_item(a: ChatAttachment) -> AttachmentItem {
 }
 
 fn chat_msg(m: ChatMsg) -> ChatMessage {
+    let initial = initial_of(&m.author);
     ChatMessage {
         id: m.id.into(),
+        initial: initial.into(),
         author: m.author.into(),
         body: m.body.into(),
         time: m.time.into(),
@@ -345,20 +376,34 @@ fn chat_msg(m: ChatMsg) -> ChatMessage {
 
 fn parse_hex(s: &str) -> Option<slint::Color> {
     let s = s.trim().trim_start_matches('#');
-    let (r, g, b) = match s.len() {
+    let (r, g, b, a) = match s.len() {
+        8 => (
+            u8::from_str_radix(&s[0..2], 16).ok()?,
+            u8::from_str_radix(&s[2..4], 16).ok()?,
+            u8::from_str_radix(&s[4..6], 16).ok()?,
+            u8::from_str_radix(&s[6..8], 16).ok()?,
+        ),
         6 => (
             u8::from_str_radix(&s[0..2], 16).ok()?,
             u8::from_str_radix(&s[2..4], 16).ok()?,
             u8::from_str_radix(&s[4..6], 16).ok()?,
+            255,
+        ),
+        4 => (
+            u8::from_str_radix(&s[0..1], 16).ok()? * 17,
+            u8::from_str_radix(&s[1..2], 16).ok()? * 17,
+            u8::from_str_radix(&s[2..3], 16).ok()? * 17,
+            u8::from_str_radix(&s[3..4], 16).ok()? * 17,
         ),
         3 => (
             u8::from_str_radix(&s[0..1], 16).ok()? * 17,
             u8::from_str_radix(&s[1..2], 16).ok()? * 17,
             u8::from_str_radix(&s[2..3], 16).ok()? * 17,
+            255,
         ),
         _ => return None,
     };
-    Some(slint::Color::from_rgb_u8(r, g, b))
+    Some(slint::Color::from_argb_u8(a, r, g, b))
 }
 
 #[cfg(test)]
@@ -369,8 +414,21 @@ mod tests {
     fn parses_hex_colors() {
         let c = parse_hex("#5865F2").unwrap();
         assert_eq!((c.red(), c.green(), c.blue()), (0x58, 0x65, 0xF2));
+        assert_eq!(c.alpha(), 255);
         assert!(parse_hex("fff").is_some());
-        assert!(parse_hex("nope").is_none());
         assert!(parse_hex("#12345").is_none());
+        assert!(parse_hex("nope").is_none());
+
+        let c = parse_hex("#ffffff14").unwrap();
+        assert_eq!(
+            (c.red(), c.green(), c.blue(), c.alpha()),
+            (255, 255, 255, 0x14)
+        );
+
+        let c = parse_hex("#f00c").unwrap();
+        assert_eq!(
+            (c.red(), c.green(), c.blue(), c.alpha()),
+            (0xff, 0, 0, 0xcc)
+        );
     }
 }

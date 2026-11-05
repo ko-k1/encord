@@ -2,8 +2,9 @@
 //! Abaddon parity: `memory_db = true` keeps everything in RAM; otherwise WAL-mode
 //! SQLite so the UI can paint instantly (<150ms) before Gateway READY hydrates.
 
-use encord_core::{Channel, ChannelRead, Guild, Member, Message, Snowflake};
+use encord_core::{Channel, ChannelRead, Guild, Member, Message, Snowflake, User};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -18,6 +19,15 @@ pub enum CacheError {
 
 pub struct Cache {
     conn: Mutex<Connection>,
+}
+
+/// Small display helper shared by name lookups: usernames, with a bot tag.
+fn user_label(user: &User) -> String {
+    if user.bot {
+        format!("{} [BOT]", user.username)
+    } else {
+        user.username.clone()
+    }
 }
 
 impl Cache {
@@ -301,6 +311,158 @@ impl Cache {
         }
     }
 
+    /// Display name for a member in one guild (nick preferred). Unlike
+    /// [`Self::find_member_display`] this cannot pick a nickname from a
+    /// different guild where the same user is also a member.
+    pub fn member_display(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    ) -> Result<Option<String>, CacheError> {
+        let conn = self.lock();
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT json FROM members WHERE guild_id = ?1 AND user_id = ?2",
+                params![guild_id.to_string(), user_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(json
+            .and_then(|json| serde_json::from_str::<Member>(&json).ok())
+            .map(|m| m.display()))
+    }
+
+    /// Human-readable name for a user id. Prefers a guild member row (so
+    /// nicknames show), then DM/group-DM recipients, then cached message
+    /// authors. This keeps the event log and typing indicator free of raw
+    /// snowflakes.
+    pub fn find_user_name(&self, user_id: Snowflake) -> Result<Option<String>, CacheError> {
+        if let Some(display) = self.find_member_display(user_id)? {
+            return Ok(Some(display));
+        }
+        let conn = self.lock();
+        let pattern = format!("%\"id\":\"{user_id}\"%");
+        let mut stmt = conn.prepare("SELECT json FROM channels WHERE json LIKE ?1")?;
+        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+        for json in rows {
+            let json = json?;
+            let Ok(channel) = serde_json::from_str::<Channel>(&json) else {
+                continue;
+            };
+            if let Some(user) = channel.recipients.iter().find(|u| u.id == user_id) {
+                return Ok(Some(user_label(user)));
+            }
+        }
+        // DM channels often arrive without recipients, but cached message
+        // authors still give us a human name for the log/typing line.
+        let mut stmt = conn.prepare(
+            "SELECT json FROM messages
+             WHERE json_extract(json, '$.author.id') = ?1
+             LIMIT 1",
+        )?;
+        let rows = stmt.query_map(params![user_id.to_string()], |row| row.get::<_, String>(0))?;
+        for json in rows {
+            let json = json?;
+            if let Ok(message) = serde_json::from_str::<Message>(&json) {
+                return Ok(Some(user_label(&message.author)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Cached channel object (name + recipients) for readable labels.
+    pub fn find_channel(&self, channel_id: Snowflake) -> Result<Option<Channel>, CacheError> {
+        let conn = self.lock();
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT json FROM channels WHERE id = ?1",
+                params![channel_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(json.and_then(|json| serde_json::from_str::<Channel>(&json).ok()))
+    }
+
+    /// Resolve up to two recent non-self message-author labels for each DM
+    /// channel in one query. This names DMs whose `recipients` array is
+    /// missing without issuing one query per channel.
+    pub fn dm_author_labels(
+        &self,
+        channel_ids: &[Snowflake],
+        self_id: Option<Snowflake>,
+    ) -> Result<HashMap<Snowflake, String>, CacheError> {
+        if channel_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.lock();
+        let placeholders = vec!["?"; channel_ids.len()].join(",");
+        let sql = format!(
+            "SELECT channel_id, json FROM (
+                 SELECT channel_id, json,
+                        ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY timestamp DESC) AS rn
+                 FROM messages
+                 WHERE channel_id IN ({placeholders})
+             )
+             WHERE rn <= 50
+             ORDER BY channel_id, rn"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(channel_ids.iter().map(|id| id.to_string())),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+
+        let mut names: HashMap<Snowflake, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (channel_id, json) = row?;
+            let Ok(channel_id) = channel_id.parse::<u64>() else {
+                continue;
+            };
+            let channel_id = Snowflake::new(channel_id);
+            if names
+                .get(&channel_id)
+                .is_some_and(|labels| labels.len() >= 2)
+            {
+                continue;
+            }
+            let Ok(message) = serde_json::from_str::<Message>(&json) else {
+                continue;
+            };
+            if Some(message.author.id) == self_id {
+                continue;
+            }
+            let label = user_label(&message.author);
+            if label.is_empty() {
+                continue;
+            }
+            let labels = names.entry(channel_id).or_default();
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        Ok(names
+            .into_iter()
+            .map(|(id, labels)| (id, labels.join(", ")))
+            .collect())
+    }
+
+    /// Cached guild name (empty names report absence so callers can use a
+    /// friendly fallback instead of painting a blank label).
+    pub fn find_guild_name(&self, guild_id: Snowflake) -> Result<Option<String>, CacheError> {
+        let conn = self.lock();
+        let name: Option<String> = conn
+            .query_row(
+                "SELECT name FROM guilds WHERE id = ?1",
+                params![guild_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(name.filter(|n| !n.trim().is_empty()))
+    }
+
     pub fn list_guilds(&self) -> Result<Vec<Guild>, CacheError> {
         let conn = self.lock();
         let mut stmt = conn.prepare("SELECT json FROM guilds ORDER BY name")?;
@@ -477,6 +639,118 @@ mod tests {
             .unwrap();
         assert_eq!(c.list_members(Snowflake::new(1)).unwrap().len(), 1);
         assert_eq!(c.find_member_display(Snowflake::new(10)).unwrap(), None);
+    }
+
+    #[test]
+    fn resolves_names_for_logs_and_messages() {
+        use encord_core::{Member, User};
+
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_guild(&Guild {
+            id: Snowflake::new(1),
+            name: "Guild Name".into(),
+            icon: None,
+            unavailable: false,
+        })
+        .unwrap();
+        c.upsert_member(
+            Snowflake::new(1),
+            &Member {
+                user: User {
+                    id: Snowflake::new(10),
+                    username: "alice".into(),
+                    discriminator: "0".into(),
+                    avatar: None,
+                    bot: false,
+                },
+                nick: Some("Ali".into()),
+                roles: Vec::new(),
+                joined_at: None,
+            },
+        )
+        .unwrap();
+        let dm_user = User {
+            id: Snowflake::new(20),
+            username: "bob".into(),
+            discriminator: "0".into(),
+            avatar: None,
+            bot: false,
+        };
+        c.upsert_channel(&Channel {
+            id: Snowflake::new(30),
+            kind: 1,
+            guild_id: None,
+            name: None,
+            topic: None,
+            nsfw: false,
+            parent_id: None,
+            position: 0,
+            recipients: vec![dm_user],
+        })
+        .unwrap();
+
+        assert_eq!(
+            c.find_guild_name(Snowflake::new(1)).unwrap(),
+            Some("Guild Name".into())
+        );
+        assert_eq!(
+            c.member_display(Snowflake::new(1), Snowflake::new(10))
+                .unwrap(),
+            Some("Ali".into())
+        );
+        assert_eq!(
+            c.find_user_name(Snowflake::new(10)).unwrap(),
+            Some("Ali".into())
+        );
+        // Not a guild member: resolved through the DM recipient list.
+        assert_eq!(
+            c.find_user_name(Snowflake::new(20)).unwrap(),
+            Some("bob".into())
+        );
+        assert_eq!(
+            c.find_channel(Snowflake::new(30))
+                .unwrap()
+                .unwrap()
+                .recipients[0]
+                .username,
+            "bob"
+        );
+        assert_eq!(c.find_user_name(Snowflake::new(99)).unwrap(), None);
+        // Message authors fill the gap when a DM has no recipient rows.
+        let mut m = msg(100, 30, "2026-01-01T00:00:00Z");
+        m.author.id = Snowflake::new(99);
+        m.author.username = "carol".into();
+        c.upsert_message(&m).unwrap();
+        assert_eq!(
+            c.find_user_name(Snowflake::new(99)).unwrap(),
+            Some("carol".into())
+        );
+    }
+
+    #[test]
+    fn batches_dm_author_labels() {
+        let c = Cache::open_in_memory().unwrap();
+        // Oldest to newest: self, bob, carol. Labels are newest-first and
+        // exclude the current user.
+        for (id, author_id, name, ts) in [
+            (1, 9, "me", "2026-01-01T00:00:01Z"),
+            (2, 20, "bob", "2026-01-01T00:00:02Z"),
+            (3, 21, "carol", "2026-01-01T00:00:03Z"),
+        ] {
+            let mut m = msg(id, 30, ts);
+            m.author.id = Snowflake::new(author_id);
+            m.author.username = name.into();
+            c.upsert_message(&m).unwrap();
+        }
+
+        let labels = c
+            .dm_author_labels(&[Snowflake::new(30)], Some(Snowflake::new(9)))
+            .unwrap();
+        assert_eq!(
+            labels.get(&Snowflake::new(30)).map(String::as_str),
+            Some("carol, bob")
+        );
+        assert!(c.dm_author_labels(&[], None).unwrap().is_empty());
     }
 
     #[test]
