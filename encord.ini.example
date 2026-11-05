@@ -1,0 +1,43 @@
+# encord.ini — Abaddon-style config. Edit while encord is closed.
+# `#` starts comments. Section and key names are case-sensitive.
+# Lookup: ./encord.ini, else %APPDATA%/encord/encord.ini
+
+[discord]
+# Override gateway (must be json + zlib-stream). Empty = default v9.
+gateway =
+# Override REST base. Empty = https://discord.com/api (v9 appended).
+api_base = https://discord.com/api
+# true = RAM only; false = SQLite encord.db next to ini (instant paint).
+memory_db = false
+# User token. Prefer OS keychain when supported; ini is the fallback.
+# Get it via DiscordChatExporter #76 instructions. NEVER share it.
+token =
+# Auto-download avatars/attachments on new messages.
+prefetch = false
+# Connect on launch.
+autoconnect = false
+# Store token in system keychain when available.
+keychain = true
+# IDENTIFY overrides. Empty = official desktop defaults
+# (os "Windows", browser "Discord Client").
+os =
+browser =
+
+[gui]
+stock_emojis = true
+custom_emojis = true
+css = res/css/encord.css
+theme = midnight-club
+animations = true
+animated_guild_hover_only = true
+owner_crown = true
+unreads = true
+save_state = true
+hide_to_tray = false
+show_deleted_indicator = true
+font_scale = 1.0
+
+[http]
+# REST User-Agent override. Empty = stock desktop UA (super-properties
+# stay in sync automatically).
+user_agent =

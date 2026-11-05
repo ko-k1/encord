@@ -1,0 +1,12 @@
+[package]
+name = "encord-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encord-core.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }

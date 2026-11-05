@@ -1,0 +1,66 @@
+/* encord.css — Abaddon-compatible GTK selectors.
+ * Style the native UI here (BetterDiscord-like workflow, no Chromium).
+ * Tokens from themes/*.toml are exposed as --encord-* variables.
+ * Full selector list mirrors Abaddon README styling section. */
+
+:root {
+  --encord-color-bg0: #0e0f13;
+  --encord-color-bg1: #171923;
+  --encord-color-accent: #5865f2;
+  --encord-color-text0: #ffffff;
+  --encord-color-text1: #b5bac1;
+}
+
+.app-window {
+  background-color: var(--encord-color-bg0);
+}
+
+.channel-list {
+  background-color: var(--encord-color-bg1);
+}
+
+.messages {
+  background-color: var(--encord-color-bg0);
+}
+
+.message-container-author {
+  font-weight: bold;
+}
+
+.message-text {
+  color: var(--encord-color-text0);
+}
+
+.message-text.pending {
+  opacity: 0.6;
+}
+
+.message-text.failed {
+  color: #f23f43;
+}
+
+.message-input {
+  background-color: var(--encord-color-bg1);
+  border-radius: 8px;
+}
+
+.embed {
+  border-left: 3px solid var(--encord-color-accent);
+  border-radius: 6px;
+}
+
+.member-list {
+  background-color: var(--encord-color-bg1);
+}
+
+.typing-indicator {
+  color: var(--encord-color-text1);
+}
+
+.reaction-box {
+  border-radius: 8px;
+}
+
+.reaction-box.reacted {
+  border: 1px solid var(--encord-color-accent);
+}

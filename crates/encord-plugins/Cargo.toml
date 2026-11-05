@@ -1,0 +1,10 @@
+[package]
+name = "encord-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encord-core.workspace = true
+thiserror.workspace = true
+serde.workspace = true

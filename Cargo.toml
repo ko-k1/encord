@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "crates/encord-core",
+    "crates/encord-settings",
+    "crates/encord-cache",
+    "crates/encord-gateway",
+    "crates/encord-rest",
+    "crates/encord-theme",
+    "crates/encord-voice",
+    "crates/encord-plugins",
+    "crates/encord-ui",
+    "crates/encord-identity",
+    "crates/encord-rpc",
+    "crates/encord-media",
+    "apps/encord",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["encord contributors"]
+repository = "https://github.com/encord/encord"
+
+[workspace.dependencies]
+encord-core = { path = "crates/encord-core" }
+encord-settings = { path = "crates/encord-settings" }
+encord-cache = { path = "crates/encord-cache" }
+encord-gateway = { path = "crates/encord-gateway" }
+encord-rest = { path = "crates/encord-rest" }
+encord-theme = { path = "crates/encord-theme" }
+encord-voice = { path = "crates/encord-voice" }
+encord-plugins = { path = "crates/encord-plugins" }
+encord-ui = { path = "crates/encord-ui" }
+encord-identity = { path = "crates/encord-identity" }
+encord-rpc = { path = "crates/encord-rpc" }
+encord-media = { path = "crates/encord-media" }
+
+tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "net", "time", "sync", "fs", "io-util"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

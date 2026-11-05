@@ -1,0 +1,5 @@
+# Local configuration and runtime data (never commit secrets)
+/encord.ini
+/encord.db
+/encord.db-shm
+/encord.db-wal

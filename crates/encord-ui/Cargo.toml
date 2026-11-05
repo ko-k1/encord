@@ -1,0 +1,21 @@
+[package]
+name = "encord-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encord-core.workspace = true
+anyhow = "1"
+slint = { version = "1.17", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg-wgpu",
+    "system-tray",
+    "accessibility",
+    "image-default-formats",
+] }
+
+[build-dependencies]
+slint-build = "1.17"

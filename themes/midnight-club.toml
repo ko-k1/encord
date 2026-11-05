@@ -1,0 +1,27 @@
+[meta]
+id = "midnight-club"
+mode = "dark"
+
+[color]
+bg0 = "#0e0f13"
+bg1 = "#171923"
+accent = "#5865f2"
+text0 = "#ffffff"
+text1 = "#b5bac1"
+danger = "#f23f43"
+
+[radius]
+sm = "6"
+md = "10"
+lg = "16"
+
+[spacing]
+xs = "4"
+sm = "8"
+md = "12"
+lg = "16"
+
+[type]
+body = "Inter 14"
+mono = "JetBrainsMono 13"
+scale = "1.0"

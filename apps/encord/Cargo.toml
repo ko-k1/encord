@@ -1,0 +1,27 @@
+[package]
+name = "encord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "encord"
+path = "src/main.rs"
+
+[dependencies]
+encord-core.workspace = true
+encord-settings.workspace = true
+encord-cache.workspace = true
+encord-gateway.workspace = true
+encord-rest.workspace = true
+encord-theme.workspace = true
+encord-voice.workspace = true
+encord-plugins.workspace = true
+encord-ui.workspace = true
+encord-rpc.workspace = true
+encord-media.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+anyhow = "1"

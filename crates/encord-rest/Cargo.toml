@@ -1,0 +1,15 @@
+[package]
+name = "encord-rest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encord-core.workspace = true
+encord-identity.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing.workspace = true

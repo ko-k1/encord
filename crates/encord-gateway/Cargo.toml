@@ -1,0 +1,18 @@
+[package]
+name = "encord-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encord-core.workspace = true
+encord-identity.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+http = "1.0"
+flate2 = "1.0"
+tracing.workspace = true

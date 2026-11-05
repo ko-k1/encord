@@ -1,0 +1,497 @@
+// encord AppWindow — retained-mode GPU UI (Slint + FemtoVG on wgpu/Vulkan).
+// Colors default to themes/midnight-club.toml tokens and are live-settable
+// from any token theme. No webview, no DOM.
+import { Button, CheckBox, ComboBox, LineEdit, ListView, TabWidget } from "std-widgets.slint";
+
+struct GuildEntry {
+    id: string,
+    label: string,
+    unread: bool,
+    icon: image,
+}
+
+struct ChannelEntry {
+    id: string,
+    name: string,
+    header: bool,
+    unread: bool,
+    mentions: int,
+}
+
+struct MemberItem {
+    id: string,
+    display: string,
+    status: string,
+}
+
+struct AttachmentItem {
+    is-image: bool,
+    image: image,
+    label: string,
+}
+
+struct ChatMessage {
+    id: string,
+    author: string,
+    body: string,
+    time: string,
+    reply: string,
+    reactions: string,
+    attachments: [AttachmentItem],
+}
+
+export component AppWindow inherits Window {
+    title: "encord";
+    min-width: 1000px;
+    min-height: 640px;
+    background: c-bg0;
+    default-font-size: 14px;
+
+    // Live theme colors (set from themes/*.toml tokens).
+    in-out property <color> c-bg0: #0e0f13;
+    in-out property <color> c-bg1: #171923;
+    in-out property <color> c-accent: #5865f2;
+    in-out property <color> c-text0: #ffffff;
+    in-out property <color> c-text1: #b5bac1;
+
+    in-out property <string> status-text: "starting…";
+    in-out property <string> connect-label: "Connect";
+    in-out property <string> guild-name: "encord";
+    in-out property <[GuildEntry]> guilds;
+    in-out property <[ChannelEntry]> channels;
+    in-out property <[ChatMessage]> messages;
+    in-out property <[string]> event-log;
+
+    // Userlist (selected guild) + chat header.
+    in-out property <[MemberItem]> online;
+    in-out property <[MemberItem]> offline;
+    in-out property <int> online-count: 0;
+    in-out property <int> offline-count: 0;
+    in-out property <string> channel-title: "";
+    in-out property <string> channel-topic: "";
+    in-out property <string> typing-text: "";
+
+    // Settings page state + options.
+    in-out property <bool> show-settings: false;
+    in-out property <string> token-text: "";
+    in-out property <bool> autoconnect: false;
+    in-out property <[string]> themes;
+    in-out property <string> current-theme: "";
+
+    callback send-message(string);
+    callback channel-selected(string);
+    callback guild-selected(string);
+    callback connect-pressed();
+    callback save-settings(string, bool, string);
+    callback reload-css();
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Guild rail.
+        Rectangle {
+            width: 64px;
+            background: c-bg0;
+            VerticalLayout {
+                // Explicit geometry: layouts inside plain elements do not
+                // auto-size, and 0×0 content paints (and clicks) nowhere.
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                padding-top: 8px;
+                spacing: 6px;
+                for g in guilds: Rectangle {
+                    height: 44px;
+                    border-radius: 12px;
+                    background: c-bg1;
+                    TouchArea {
+                        // Explicit geometry: bare elements default to 0×0
+                        // and would never see clicks.
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => { root.guild-selected(g.id); }
+                    }
+                    // Initials show through wherever the icon is missing.
+                    Text {
+                        text: g.label;
+                        color: c-text0;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    Image {
+                        source: g.icon;
+                        width: 44px;
+                        height: 44px;
+                        image-fit: cover;
+                    }
+                    // Rounded icon mask (Image itself takes no radius).
+                    if g.unread: Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        x: 48px;
+                        y: 4px;
+                        border-radius: 4px;
+                        background: c-text0;
+                    }
+                }
+            }
+        }
+
+        // Channel column.
+        Rectangle {
+            width: 220px;
+            background: c-bg1;
+            VerticalLayout {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                spacing: 0px;
+                Text {
+                    text: guild-name;
+                    color: c-text0;
+                    font-size: 15px;
+                    font-weight: 700;
+                    height: 48px;
+                    vertical-alignment: center;
+                    x: 12px;
+                }
+                Rectangle { height: 1px; background: c-bg0; }
+                ListView {
+                    vertical-stretch: 1;
+                    for c in channels: Rectangle {
+                        height: c.header ? 28px : 34px;
+                        if !c.header: TouchArea {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            clicked => { root.channel-selected(c.id); }
+                        }
+                        if c.unread: Rectangle {
+                            width: 4px;
+                            height: 20px;
+                            x: 2px;
+                            y: 7px;
+                            border-radius: 2px;
+                            background: c-text0;
+                        }
+                        Text {
+                            text: c.name;
+                            color: c.header ? c-text0 : c-text1;
+                            font-size: c.header ? 11px : 14px;
+                            font-weight: c.header || c.unread ? 700 : 400;
+                            x: 12px;
+                            vertical-alignment: center;
+                        }
+                        if c.mentions > 0: Rectangle {
+                            width: 22px;
+                            height: 18px;
+                            x: 186px;
+                            y: 8px;
+                            border-radius: 9px;
+                            background: #f04747;
+                            Text {
+                                text: c.mentions;
+                                color: #ffffff;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: c-bg0; }
+                HorizontalLayout {
+                    height: 52px;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    Button {
+                        text: connect-label;
+                        clicked => { root.connect-pressed(); }
+                    }
+                    Button {
+                        text: "⚙";
+                        clicked => { root.show-settings = true; }
+                    }
+                    Text {
+                        text: status-text;
+                        color: c-text1;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+
+        // Main column: chat or settings.
+        Rectangle {
+            horizontal-stretch: 1;
+            background: c-bg0;
+            if !root.show-settings: VerticalLayout {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                spacing: 0px;
+                // Chat header: channel title, topic, typing.
+                VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 8px;
+                    spacing: 0px;
+                    Text {
+                        text: channel-title;
+                        color: c-text0;
+                        font-size: 15px;
+                        font-weight: 700;
+                    }
+                    if channel-topic != "": Text {
+                        text: channel-topic;
+                        color: c-text1;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    if typing-text != "": Text {
+                        text: typing-text;
+                        color: c-text1;
+                        font-size: 12px;
+                    }
+                }
+                Rectangle { height: 8px; }
+                ListView {
+                    vertical-stretch: 1;
+                    for m in messages: VerticalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 2px;
+                        if m.reply != "": Text {
+                            text: m.reply;
+                            color: c-text1;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: m.author;
+                                color: c-accent;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: m.time;
+                                color: c-text1;
+                                font-size: 11px;
+                                vertical-alignment: bottom;
+                            }
+                        }
+                        Text {
+                            text: m.body;
+                            color: c-text0;
+                            wrap: word-wrap;
+                        }
+                        for a in m.attachments: Rectangle {
+                            height: a.is-image ? 170px : 26px;
+                            if a.is-image: Image {
+                                source: a.image;
+                                width: 300px;
+                                height: 170px;
+                                image-fit: contain;
+                                horizontal-alignment: left;
+                            }
+                            if !a.is-image: Text {
+                                text: a.label;
+                                color: c-text1;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if m.reactions != "": Text {
+                            text: m.reactions;
+                            color: c-text1;
+                            font-size: 13px;
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: c-bg1; }
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    input := LineEdit {
+                        placeholder-text: "Message…";
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "Send";
+                        clicked => {
+                            root.send-message(input.text);
+                            input.text = "";
+                        }
+                    }
+                }
+            }
+            if root.show-settings: VerticalLayout {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                padding: 24px;
+                spacing: 12px;
+                Text {
+                    text: "Settings";
+                    color: c-text0;
+                    font-size: 20px;
+                    font-weight: 700;
+                }
+                Text { text: "User token (restart-free: press Connect after saving)"; color: c-text1; }
+                tokenbox := LineEdit {
+                    text: root.token-text;
+                    placeholder-text: "Discord token";
+                }
+                autobox := CheckBox {
+                    text: "Connect on launch";
+                    checked: root.autoconnect;
+                }
+                Text { text: "Theme"; color: c-text1; }
+                themebox := ComboBox {
+                    model: root.themes;
+                    current-value: root.current-theme;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "Save";
+                        clicked => {
+                            root.save-settings(tokenbox.text, autobox.checked, themebox.current-value);
+                        }
+                    }
+                    Button {
+                        text: "Reload CSS";
+                        clicked => { root.reload-css(); }
+                    }
+                    Button {
+                        text: "Back";
+                        clicked => { root.show-settings = false; }
+                    }
+                }
+                Text {
+                    text: status-text;
+                    color: c-text1;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Right column: userlist + diagnostics tabs.
+        Rectangle {
+            width: 250px;
+            background: c-bg1;
+            TabWidget {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                Tab {
+                    title: "Members";
+                    VerticalLayout {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: parent.height;
+                        spacing: 0px;
+                        Text {
+                            text: "ONLINE — " + online-count;
+                            color: c-text0;
+                            font-size: 11px;
+                            font-weight: 700;
+                            height: 28px;
+                            vertical-alignment: center;
+                            x: 12px;
+                        }
+                        ListView {
+                            vertical-stretch: 3;
+                            for m in online: HorizontalLayout {
+                                height: 30px;
+                                spacing: 8px;
+                                padding-left: 12px;
+                                Rectangle {
+                                    width: 10px;
+                                    height: 10px;
+                                    y: 10px;
+                                    border-radius: 5px;
+                                    background: m.status == "online" ? #43b581 : m.status == "idle" ? #faa61a : m.status == "dnd" ? #f04747 : #747f8d;
+                                }
+                                Text {
+                                    text: m.display;
+                                    color: c-text1;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Text {
+                            text: "OFFLINE — " + offline-count;
+                            color: c-text0;
+                            font-size: 11px;
+                            font-weight: 700;
+                            height: 28px;
+                            vertical-alignment: center;
+                            x: 12px;
+                        }
+                        ListView {
+                            vertical-stretch: 2;
+                            for m in offline: HorizontalLayout {
+                                height: 30px;
+                                spacing: 8px;
+                                padding-left: 12px;
+                                Rectangle {
+                                    width: 10px;
+                                    height: 10px;
+                                    y: 10px;
+                                    border-radius: 5px;
+                                    background: #747f8d;
+                                }
+                                Text {
+                                    text: m.display;
+                                    color: #747f8d;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+                Tab {
+                    title: "Events";
+                    VerticalLayout {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width;
+                        height: parent.height;
+                        spacing: 0px;
+                        ListView {
+                            vertical-stretch: 1;
+                            for e in event-log: Text {
+                                text: e;
+                                color: c-text1;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                                x: 12px;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
